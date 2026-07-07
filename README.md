@@ -41,7 +41,95 @@ Run the Flask application:
 python app.py
 ```
 
-The web interface will be available at `http://127.0.0.1:5000`
+The web interface will be available at `http://127.0.0.1:5002`
+
+### Legacy / old-browser mode
+
+For very old browsers that can't run modern JS/CSS — the target case is Mobile
+Safari on iOS 6 — start the server with `--legacy`:
+
+```bash
+python app.py --legacy
+```
+
+This serves an ES5-only `legacy.js` (no arrow functions, `fetch`, `async`/
+`await`, optional chaining, `Promise`, or `classList` reliance — uses `XMLHttpRequest`
+and manual `style.display`/`visibility` toggling instead) and a `legacy.css`
+that avoids CSS custom properties, CSS Grid, and modern Flexbox/`backdrop-filter`
+in favor of float/inline-block layout and `-webkit-`-prefixed gradients,
+transitions, and animations. Same server, same REST API, same HTML template
+and element IDs as the modern UI — no functionality is dropped, and the visual
+design is kept as close to the modern look as old WebKit allows.
+
+Other flags:
+
+```bash
+python app.py --host 0.0.0.0 --port 5002 --debug
+```
+
+### Running as a background service
+
+If the server needs to survive the terminal session that started it (e.g.
+running it directly on a jailbroken iOS device, where the terminal app can
+get killed on screen lock/app switch and takes its child processes with it),
+there are three options, roughly in order of how much setup they need.
+
+**`serverctl.py`** - the easiest option, a small cross-platform wrapper
+around `--daemon` below. By default it's equivalent to
+`python app.py --daemon --pid-file ipatool-webui.pid --log-file ipatool-webui.log`:
+
+```bash
+python serverctl.py                      # start (add --legacy / --debug as needed)
+python serverctl.py --kill-server         # stop it
+```
+
+On POSIX it just drives `app.py --daemon` (see below). On Windows, since
+double-fork daemonizing doesn't exist there, it instead launches `app.py`
+directly as a detached process (`CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`)
+and manages the PID file/log redirection itself. Refuses to start a second
+copy if one's already running (per the PID file), and `--kill-server` cleans
+up a stale PID file gracefully if the process is already gone.
+
+**`--daemon`** - a plain double-fork daemonize, implemented with nothing but
+the Python stdlib `os` module (this is literally what `nohup`/`setsid` do
+internally), so it works even where those binaries aren't installed:
+
+```bash
+python app.py --legacy --daemon --pid-file ipatool-webui.pid --log-file ipatool-webui.log
+```
+
+The command returns immediately; the server keeps running detached from the
+terminal entirely (not just SIGHUP-immune - it has no controlling terminal at
+all, so closing/killing the terminal app can't touch it). Check on it with:
+
+```bash
+ps -p $(cat ipatool-webui.pid)   # is it still running?
+tail -f ipatool-webui.log        # what's it doing? (stdout/stderr go here)
+kill $(cat ipatool-webui.pid)    # stop it
+```
+
+Note `--daemon` only detaches the process - it doesn't restart it if it
+crashes, and it won't survive a reboot on its own.
+
+**launchd** - the actual OS-native service manager on iOS/macOS, if you want
+auto-restart-on-crash and start-on-boot. See `scripts/com.ipatool.webui.plist`
+for a template; fill in the paths for your setup (the `python3` inside your
+venv - find it with `which python3` while the venv is active - and the repo's
+working directory), then:
+
+```bash
+# copy it into place (needs root)
+cp scripts/com.ipatool.webui.plist /Library/LaunchDaemons/
+chown root:wheel /Library/LaunchDaemons/com.ipatool.webui.plist
+chmod 644 /Library/LaunchDaemons/com.ipatool.webui.plist
+
+# load it (older launchctl syntax; some setups may need
+# `launchctl bootstrap system /Library/LaunchDaemons/com.ipatool.webui.plist` instead)
+launchctl load /Library/LaunchDaemons/com.ipatool.webui.plist
+
+# stop/unload later with:
+launchctl unload /Library/LaunchDaemons/com.ipatool.webui.plist
+```
 
 ### Authentication
 
@@ -71,7 +159,9 @@ The web interface will be available at `http://127.0.0.1:5000`
 ### Downloading IPAs
 
 1. In the expanded metadata view, click Download IPA
-2. It will first prepare (by downloading to the server cache), then pass that along to the browser to download
+2. The server downloads it in the background (a job you can poll for real progress) and hands the finished file to your browser as a normal download once ready - no more one giant blocking request with zero feedback
+
+There's also a **💾 Save on server** button next to Download IPA. Instead of sending the finished file to the browser at all, it's left in `~/Downloads/IPATool/` on the machine running the server. Use this if browser downloads aren't landing anywhere usable - this has been observed on old/constrained browsers (Mobile Safari on iOS 6, specifically) that don't reliably save a file even when it's handed off via a normal navigation. If you're running the server directly on the device in question (e.g. via a jailbreak), this sidesteps the browser download path entirely.
 
 ### Installing IPAs
 
@@ -79,19 +169,26 @@ The web interface will be available at `http://127.0.0.1:5000`
 - Some people have also had success simply Airdropping it from a macOS computer and it will actually install it without any prompt, although I've had inconsistent results.
 - Another user also mentioned Sideloadly with Advanced Options > Signing Mode > Normal Install.
 
-## tvOS Notes
+## Platform selection (iPhone / iPad / Apple TV)
 
-- In the UI we can only search for tvOS apps which doesn't give back the internal versionID needed for downloads or finding other versions
-- To find that versionID, use iMazing to connect to your ATV, go to Manage Apps, right click or use option menu to Export to CSV, then use the StoreID as the App ID and the VersionID as the Version ID in this interface to both download and also find other tvOS versions
+Search, Direct Lookup, and Download all have a **Platform** selector: iPhone + iPad (default), iPhone only, iPad only, or Apple TV.
+
+Most apps use Apple's Universal Purchase, meaning the iPhone/iPad/tvOS builds all share the *same* App Store listing (App ID) - so the normal search/download calls can't tell platforms apart on their own and default to iOS. Picking **Apple TV** here resolves the latest tvOS-specific version through a separate Apple lookup endpoint (`MZStorePlatform.woa/wa/lookup`, the same one Apple's own MDM/enterprise app deployment tooling uses - and the same mechanism `majd/ipatool`'s `--platform` flag uses under the hood) before loading versions or downloading, so you get the actual tvOS build instead of the iPhone one. The downloaded package is also checked for `AppleTVOS` support in its `Info.plist` as a sanity check.
+
+Caveats:
+- This resolves the **latest** tvOS version automatically. Whether *older* tvOS versions show up in the list too depends on how Apple's backend chains version history for that particular app - for some apps it does, for others it may only be the latest.
+- If you already have a known tvOS External Version ID (e.g. from iMazing, see below), you can still enter it directly in Direct Lookup - it isn't required anymore, just an alternative.
+
+If the automatic resolution doesn't turn up what you need, iMazing remains a reliable manual fallback:
 1. Make sure you have the current version of the app downloaded on your Apple TV.
 2. Install **iMazing** on your Mac or PC
-3. Follow iMazing’s steps for connecting your Mac/PC to the Apple TV.
+3. Follow iMazing's steps for connecting your Mac/PC to the Apple TV.
 4. In iMazing, go to **Tools → Manage Apps**.
 5. Right‑click (or use the options menu) and select **Export List to CSV**.
-6. Open the CSV file. For the app’s row:
+6. Open the CSV file. For the app's row:
    - **Store ID** = `AppID` for IPATool  
    - **Version ID** = `External Version ID` for IPATool
-7. Use those values to do a Direct Lookup
+7. Use those values to do a Direct Lookup (with Platform set to Apple TV)
 8. Choose the version you want and download it
 
 ## Storage Locations

@@ -6,17 +6,19 @@ import os
 import plistlib
 import html
 import re
+import time
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode, parse_qs
 
 import requests
 
 from . import constants
+from . import platform as platform_module
 from .cookie_store import CookieStore
 from .errors import (
     AppStoreError,
@@ -267,11 +269,26 @@ class AppStoreService:
     # App discovery
     # ------------------------------------------------------------------
 
-    def search(self, account: Account, term: str, limit: int = 5, include_tvos: bool = False) -> SearchOutput:
+    def search(
+        self,
+        account: Account,
+        term: str,
+        limit: int = 5,
+        include_tvos: bool = False,
+        platform: str = "",
+    ) -> SearchOutput:
         country = self._country_code_from_storefront(account.store_front)
-        entity = "software,iPadSoftware"
-        if include_tvos:
-            entity += ",tvSoftware"
+        # `platform` (iphone/ipad/appletv) takes precedence when given and
+        # uses the exact entity mapping majd/ipatool ships (searchEntity()):
+        # iphone->software, ipad->iPadSoftware, appletv->software,tvSoftware,
+        # default->software,iPadSoftware. `include_tvos` is kept only for
+        # backward compatibility with callers that predate platform support.
+        if platform:
+            entity = platform_module.search_entity(platform)
+        else:
+            entity = "software,iPadSoftware"
+            if include_tvos:
+                entity += ",tvSoftware"
         params = {
             "entity": entity,
             "limit": str(limit),
@@ -382,6 +399,8 @@ class AppStoreService:
         app: App,
         output_path: Optional[str] = None,
         external_version_id: Optional[str] = None,
+        on_progress: Optional["Callable[[int, Optional[int]], None]"] = None,
+        on_patch_progress: Optional["Callable[[int, int], None]"] = None,
     ) -> DownloadOutput:
         guid = self._guid()
         result = self._send_download_request(account, app, guid, external_version_id)
@@ -397,34 +416,65 @@ class AppStoreService:
 
         destination = self._resolve_destination_path(app, version, output_path)
         temp_destination = destination + ".tmp"
-        self._download_file(item.get("URL"), temp_destination)
-        self._apply_patches(temp_destination, destination, metadata, account)
+        self._download_file(item.get("URL"), temp_destination, on_progress=on_progress)
+        self._apply_patches(temp_destination, destination, metadata, account, on_progress=on_patch_progress)
         Path(temp_destination).unlink(missing_ok=True)
 
         sinfs = [Sinf(id=int(s.get("id", 0)), data=s.get("sinf", b"")) for s in item.get("sinfs", [])]
         return DownloadOutput(destination_path=destination, sinfs=sinfs)
 
-    def replicate_sinf(self, package_path: str, sinfs: Iterable[Sinf]) -> None:
+    def replicate_sinf(
+        self,
+        package_path: str,
+        sinfs: Iterable[Sinf],
+        on_progress: Optional["Callable[[int, int], None]"] = None,
+    ) -> None:
         source = Path(package_path)
         temp = source.with_suffix(source.suffix + ".tmp")
 
-        with ZipFile(source, "r") as src_zip, temp.open("wb") as dst_fd:
-            with ZipFile(dst_fd, "w") as dst_zip:
-                self._replicate_zip(src_zip, dst_zip)
-                bundle_name = self._read_bundle_name(src_zip)
-                manifest = self._read_manifest_plist(src_zip)
-                info = self._read_info_plist(src_zip)
+        try:
+            with ZipFile(source, "r") as src_zip, temp.open("wb") as dst_fd:
+                with ZipFile(dst_fd, "w") as dst_zip:
+                    self._replicate_zip(src_zip, dst_zip, on_progress=on_progress)
+                    bundle_name = self._read_bundle_name(src_zip)
+                    manifest = self._read_manifest_plist(src_zip)
+                    info = self._read_info_plist(src_zip)
 
-                sinf_list = list(sinfs)
-                if manifest:
-                    self._replicate_sinf_from_manifest(dst_zip, manifest, sinf_list, bundle_name)
-                elif info:
-                    self._replicate_sinf_from_info(dst_zip, info, sinf_list, bundle_name)
-                else:
-                    raise AppStoreError("failed to find manifest or info plist")
+                    sinf_list = list(sinfs)
+                    if manifest:
+                        self._replicate_sinf_from_manifest(dst_zip, manifest, sinf_list, bundle_name)
+                    elif info:
+                        self._replicate_sinf_from_info(dst_zip, info, sinf_list, bundle_name)
+                    else:
+                        raise AppStoreError("failed to find manifest or info plist")
+        except Exception:
+            # temp is fully our own responsibility here; source is untouched
+            # at this point (see below for why that matters), so just clean
+            # up our half-written temp file and let the error propagate.
+            temp.unlink(missing_ok=True)
+            raise
 
-        source.unlink()
-        temp.rename(source)
+        # temp now holds a complete, correctly SINF-patched IPA. Swap it in
+        # for `source` with a single atomic replace() rather than a separate
+        # unlink() + rename(): those are two independent syscalls, and if
+        # anything went wrong between them (a transient lock - see the
+        # Windows PermissionError handling in _send_file_and_cleanup - a
+        # concurrent request touching the same destination path, or any
+        # other interruption) the old unlink()-then-rename() code would
+        # leave the stale, SINF-less `source` sitting untouched next to a
+        # fully valid, unrenamed `temp` - exactly the "two files, .tmp is
+        # the one that actually installs" symptom. replace() is a single
+        # syscall on both POSIX and Windows and overwrites the destination
+        # if it exists, so there's no window where that can happen.
+        last_error: Optional[Exception] = None
+        for attempt in range(5):
+            try:
+                temp.replace(source)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(0.3 * (attempt + 1))
+        raise AppStoreError(f"failed to finalize patched package: {last_error}") from last_error
 
     def list_versions(self, account: Account, app: App, external_version_id: Optional[str] = None) -> ListVersionsOutput:
         guid = self._guid()
@@ -442,6 +492,95 @@ class AppStoreService:
             external_version_identifiers=external_ids,
             latest_external_version_id=latest,
         )
+
+    # ------------------------------------------------------------------
+    # Platform (iPhone / iPad / Apple TV) support
+    # ------------------------------------------------------------------
+    #
+    # Ported from majd/ipatool v2.3.0's pkg/appstore/appstore_platform_version_lookup.go
+    # (github.com/majd/ipatool). Universal Purchase means most apps share one
+    # adamId across iOS/iPadOS/tvOS, so the normal search/download endpoints
+    # can't distinguish platforms by trackId alone and default to iOS
+    # metadata. This separate MDM app-lookup endpoint resolves the *latest*
+    # external version id for a specific platform; feeding that id into the
+    # existing list_versions()/download() calls (which already accept an
+    # external_version_id) then returns that platform's own metadata/binary
+    # instead of iOS's.
+
+    def lookup_latest_external_version_id(self, account: Account, app: App, platform: str) -> str:
+        if not app.id:
+            raise AppStoreError("app id is required for platform version lookup")
+
+        country_code = self._country_code_from_storefront(account.store_front)
+        metadata_platform = platform_module.metadata_platform(platform)
+
+        params = {
+            "version": "2",
+            "id": str(app.id),
+            "p": "mdm-lockup",
+            "caller": "MDM",
+            "platform": metadata_platform,
+            "cc": country_code.lower(),
+            "l": "en",
+        }
+        url = "https://uclient-api.itunes.apple.com/WebObjects/MZStorePlatform.woa/wa/lookup?" + urlencode(params)
+        request = HTTPRequest(
+            method="GET",
+            url=url,
+            headers={},
+            payload=None,
+            response_format=constants.ResponseFormatJSON,
+        )
+        result = self._send_request(request)
+
+        data = result.data if isinstance(result.data, dict) else {}
+        results = data.get("results", {}) if isinstance(data.get("results"), dict) else {}
+        item = results.get(str(app.id))
+        if not item:
+            raise AppStoreError("platform version lookup returned no app", metadata=data)
+
+        offers = item.get("offers") or []
+        if not offers:
+            raise AppStoreError("platform version lookup returned no offers", metadata=data)
+
+        offer = offers[0]
+        version_info = offer.get("version") or {}
+        external_version_id = str(version_info.get("externalId") or "")
+
+        if not external_version_id:
+            buy_params = offer.get("buyParams", "")
+            parsed = parse_qs(buy_params)
+            values = parsed.get("appExtVrsId")
+            external_version_id = values[0] if values else ""
+
+        if not external_version_id:
+            raise AppStoreError("platform version lookup returned no external version id", metadata=data)
+
+        return external_version_id
+
+    def validate_package_platform(self, package_path: str, platform: str) -> None:
+        """Sanity-check that a downloaded .ipa actually declares support for
+        the requested platform. Only meaningful for Apple TV (iPhone/iPad
+        binaries aren't distinguished this way) - mirrors validatePackagePlatform
+        in majd/ipatool's appstore_download.go.
+        """
+        if platform != platform_module.PLATFORM_APPLETV:
+            return
+
+        with ZipFile(package_path) as zf:
+            for name in zf.namelist():
+                if not name.startswith("Payload/") or not name.endswith(".app/Info.plist"):
+                    continue
+                try:
+                    data = zf.read(name)
+                    info = plistlib.loads(data)
+                except Exception:
+                    continue
+                supported = info.get("CFBundleSupportedPlatforms", [])
+                if "AppleTVOS" in supported:
+                    return
+
+        raise AppStoreError("downloaded package does not declare AppleTVOS support")
 
     def get_version_metadata(self, account: Account, app: App, version_id: str) -> GetVersionMetadataOutput:
         guid = self._guid()
@@ -745,22 +884,92 @@ class AppStoreService:
             return str(output / file_name)
         return str(output)
 
-    def _download_file(self, url: str, destination: str) -> None:
+    # ipatool-py wraps its download in up to 10 retries (downloadFile()) on
+    # top of a connection-level retrying adapter; we mirror that here so a
+    # stalled/reset connection to Apple's CDN (which used to hang forever -
+    # see DEFAULT_READ_TIMEOUT / DOWNLOAD_READ_TIMEOUT in constants.py, or
+    # previously had no timeout at all) is retried automatically server-side
+    # instead of surfacing as a failed request the user has to notice and
+    # retry by hand.
+    _DOWNLOAD_MAX_RETRIES = 8
+
+    def _download_file(
+        self,
+        url: str,
+        destination: str,
+        on_progress: Optional["Callable[[int, Optional[int]], None]"] = None,
+    ) -> None:
         dest_path = Path(destination)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self._DOWNLOAD_MAX_RETRIES + 1):
+            try:
+                self._download_file_once(url, dest_path, on_progress=on_progress)
+                return
+            except (requests.exceptions.RequestException, OSError) as exc:
+                last_error = exc
+                if attempt < self._DOWNLOAD_MAX_RETRIES:
+                    # The partial file is intentionally left on disk: the
+                    # next attempt resumes via Range instead of restarting
+                    # the whole transfer.
+                    time.sleep(min(2 ** (attempt - 1), 15))
+                    continue
+
+        dest_path.unlink(missing_ok=True)
+        raise AppStoreError(
+            f"download failed after {self._DOWNLOAD_MAX_RETRIES} attempts: {last_error}"
+        ) from last_error
+
+    def _download_file_once(
+        self,
+        url: str,
+        dest_path: Path,
+        on_progress: Optional["Callable[[int, Optional[int]], None]"] = None,
+    ) -> None:
         existing = dest_path.stat().st_size if dest_path.exists() else 0
         headers = {}
         if existing:
             headers["Range"] = f"bytes={existing}-"
-        mode = "ab" if existing else "wb"
 
         response = self._http.raw_request("GET", url, headers=headers, stream=True)
         try:
             response.raise_for_status()
+
+            # Some pre-signed CDN URLs ignore Range and just return 200 with
+            # the full body again. Appending that onto an existing partial
+            # file would silently produce a corrupt, oversized IPA, so only
+            # treat this as a resume if the server actually replied 206.
+            resumed = existing > 0 and response.status_code == 206
+            mode = "ab" if resumed else "wb"
+            base_offset = existing if resumed else 0
+
+            expected_total: Optional[int] = None
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    expected_total = base_offset + int(content_length)
+                except ValueError:
+                    expected_total = None
+
+            written = base_offset
+            if on_progress:
+                on_progress(written, expected_total)
             with dest_path.open(mode) as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 512):
-                    if chunk:
-                        handle.write(chunk)
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    written += len(chunk)
+                    if on_progress:
+                        on_progress(written, expected_total)
+
+            if expected_total is not None and written != expected_total:
+                # Treat a short/incomplete transfer as retryable rather than
+                # silently handing a truncated IPA to the zip-patching step.
+                raise requests.exceptions.ChunkedEncodingError(
+                    f"incomplete download: got {written} bytes, expected {expected_total}"
+                )
         finally:
             response.close()
 
@@ -770,6 +979,7 @@ class AppStoreService:
         destination_path: str,
         metadata: Dict[str, Any],
         account: Account,
+        on_progress: Optional["Callable[[int, int], None]"] = None,
     ) -> None:
         src = Path(source_path)
         dst = Path(destination_path)
@@ -777,17 +987,26 @@ class AppStoreService:
 
         with src.open("rb") as src_fd, dst.open("wb") as dst_fd:
             with ZipFile(src_fd) as src_zip, ZipFile(dst_fd, "w") as dst_zip:
-                self._replicate_zip(src_zip, dst_zip)
+                self._replicate_zip(src_zip, dst_zip, on_progress=on_progress)
                 self._write_metadata(dst_zip, metadata, account)
 
-    def _replicate_zip(self, src_zip: ZipFile, dst_zip: ZipFile) -> None:
-        for info in src_zip.infolist():
+    def _replicate_zip(
+        self,
+        src_zip: ZipFile,
+        dst_zip: ZipFile,
+        on_progress: Optional["Callable[[int, int], None]"] = None,
+    ) -> None:
+        entries = src_zip.infolist()
+        total = len(entries)
+        for index, info in enumerate(entries):
             data = src_zip.read(info.filename)
             new_info = ZipInfo(filename=info.filename)
             new_info.compress_type = info.compress_type
             new_info.external_attr = info.external_attr
             new_info.date_time = info.date_time
             dst_zip.writestr(new_info, data)
+            if on_progress:
+                on_progress(index + 1, total)
 
     def _write_metadata(self, zip_file: ZipFile, metadata: Dict[str, Any], account: Account) -> None:
         metadata = dict(metadata)
@@ -828,7 +1047,11 @@ class AppStoreService:
     ) -> None:
         paths = manifest.get("SinfPaths", [])
         for sinf_data, relative_path in zip(sinfs, paths):
-            full_path = f"Payload/{bundle_name}.app/{relative_path}"
+            # bundle_name already ends in ".app" (it's the .app folder's own
+            # name, from _read_bundle_name's path.parent.name) - appending
+            # ".app" again here produced "X.app.app", putting the SINF in a
+            # directory that doesn't exist in the actual package.
+            full_path = f"Payload/{bundle_name}/{relative_path}"
             info = ZipInfo(full_path)
             info.compress_type = ZIP_DEFLATED
             zip_file.writestr(info, sinf_data.data)
@@ -845,7 +1068,9 @@ class AppStoreService:
         executable = info_plist.get("CFBundleExecutable")
         if not executable:
             raise AppStoreError("missing CFBundleExecutable")
-        full_path = f"Payload/{bundle_name}.app/SC_Info/{executable}.sinf"
+        # See the note in _replicate_sinf_from_manifest: bundle_name already
+        # includes ".app", so this must not append it again.
+        full_path = f"Payload/{bundle_name}/SC_Info/{executable}.sinf"
         info = ZipInfo(full_path)
         info.compress_type = ZIP_DEFLATED
         zip_file.writestr(info, sinfs[0].data)

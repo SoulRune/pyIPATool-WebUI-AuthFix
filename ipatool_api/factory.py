@@ -11,7 +11,7 @@ from .routes.ui import ui_bp
 from .services import AppStoreConfig, AppStoreService, CookieStore, FileKeychain, Machine
 
 
-def create_app() -> Flask:
+def create_app(legacy: bool = False) -> Flask:
     package_root = Path(__file__).resolve().parent
     template_dir = package_root.parent / "templates"
     static_dir = package_root.parent / "static"
@@ -21,6 +21,11 @@ def create_app() -> Flask:
         template_folder=str(template_dir),
         static_folder=str(static_dir),
     )
+
+    # When True, templates link the ES5 / prefixed-CSS "legacy" assets instead
+    # of the modern ones, for compatibility with old browsers (e.g. Mobile
+    # Safari on iOS 6). Toggle with `python app.py --legacy`.
+    app.config["LEGACY_MODE"] = legacy
 
     machine = Machine()
     config_dir = Path(machine.home_directory()) / ".ipatool"

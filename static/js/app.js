@@ -27,6 +27,7 @@ class IPAToolUI {
 
     this.currentAppId = null;
     this.currentBundleId = null;
+    this.currentPlatform = '';
 
     this.tabs = document.querySelectorAll('.tab-btn');
     this.tabContents = document.querySelectorAll('.tab-content');
@@ -90,12 +91,12 @@ class IPAToolUI {
       tab.addEventListener('click', () => this.switchTab(tab.dataset.tab));
     });
 
-    // Toggle tvOS hint visibility
-    const tvosCheckbox = document.querySelector('#tvos-checkbox');
-    const tvosHint = document.querySelector('#tvos-hint');
-    if (tvosCheckbox && tvosHint) {
-      tvosCheckbox.addEventListener('change', (e) => {
-        tvosHint.hidden = !e.target.checked;
+    // Show the Apple TV hint only when that platform is selected
+    const platformSelect = document.querySelector('#platform-select');
+    const platformHint = document.querySelector('#platform-hint');
+    if (platformSelect && platformHint) {
+      platformSelect.addEventListener('change', (e) => {
+        platformHint.hidden = e.target.value !== 'appletv';
       });
     }
 
@@ -313,14 +314,9 @@ class IPAToolUI {
     const params = new URLSearchParams();
     if (formData.term) params.set('term', formData.term);
     if (formData.limit) params.set('limit', formData.limit);
-    
-    // Store whether this is a tvOS search
-    this.lastSearchWasTvOS = false;
-    if (formData.includeTvos === 'on' || formData.includeTvos === true) {
-      params.set('includeTvos', 'true');
-      this.lastSearchWasTvOS = true;
-    }
-    
+    if (formData.platform) params.set('platform', formData.platform);
+    this.lastSearchPlatform = formData.platform || '';
+
     try {
       const response = await fetch(`${this.apiUrl('/api/search')}?${params.toString()}`);
       const payload = await response.json();
@@ -369,14 +365,9 @@ class IPAToolUI {
           return;
         }
         
-        // Show alert if this was a tvOS search
-        if (this.lastSearchWasTvOS) {
-          alert('Note: The versions listed will be iOS versions by default. To view tvOS-specific versions, use the Direct Lookup tab and enter a tvOS Version ID to filter related tvOS versions.');
-        }
-        
         const appId = card.dataset.appId;
         const bundleId = card.dataset.bundleId;
-        this.loadAppVersions(appId, bundleId);
+        this.loadAppVersions(appId, bundleId, null, this.lastSearchPlatform);
       });
     });
 
@@ -401,17 +392,19 @@ class IPAToolUI {
       this.showToast('Please provide App ID or Bundle ID', true);
       return;
     }
-    this.loadAppVersions(formData.appId, formData.bundleId, formData.externalVersionId);
+    this.loadAppVersions(formData.appId, formData.bundleId, formData.externalVersionId, formData.platform);
   }
 
-  async loadAppVersions(appId, bundleId, externalVersionId = null) {
+  async loadAppVersions(appId, bundleId, externalVersionId = null, platform = '') {
     this.currentAppId = appId;
     this.currentBundleId = bundleId;
+    this.currentPlatform = platform || '';
 
     const params = new URLSearchParams();
     if (appId) params.set('appId', appId);
     if (bundleId) params.set('bundleId', bundleId);
     if (externalVersionId) params.set('externalVersionId', externalVersionId);
+    if (this.currentPlatform) params.set('platform', this.currentPlatform);
 
     try {
       this.versionsSection.hidden = false;
@@ -426,7 +419,7 @@ class IPAToolUI {
         if (data.error && data.error.includes('license') || data.metadata?.failureType === '9610') {
           const shouldAcquire = confirm('A license is required to view versions for this app. Would you like to acquire it now?');
           if (shouldAcquire) {
-            await this.acquireLicenseAndRetry(appId, bundleId, externalVersionId);
+            await this.acquireLicenseAndRetry(appId, bundleId, externalVersionId, this.currentPlatform);
             return;
           }
         }
@@ -442,7 +435,7 @@ class IPAToolUI {
     }
   }
 
-  async acquireLicenseAndRetry(appId, bundleId, externalVersionId = null) {
+  async acquireLicenseAndRetry(appId, bundleId, externalVersionId = null, platform = '') {
     try {
       this.showToast('Acquiring license...');
       
@@ -464,7 +457,7 @@ class IPAToolUI {
       this.showToast('License acquired successfully');
       
       // Retry loading versions
-      await this.loadAppVersions(appId, bundleId, externalVersionId);
+      await this.loadAppVersions(appId, bundleId, externalVersionId, platform);
     } catch (error) {
       this.showToast(error.message || 'Failed to acquire license', true);
       this.versionsSection.hidden = true;
@@ -551,6 +544,7 @@ class IPAToolUI {
             </dl>
             <div class="version-actions">
               <button type="button" class="download-version-btn" data-version-id="${version.versionId}">Download IPA</button>
+              <button type="button" class="save-server-btn secondary" data-version-id="${version.versionId}" title="Save directly on the machine running the server, skip the browser download entirely">💾 Save on server</button>
             </div>
           </div>
         </div>
@@ -569,6 +563,13 @@ class IPAToolUI {
         e.stopPropagation();
         this.downloadVersion(card.dataset.versionId, false);
       });
+
+      const saveServerBtn = card.querySelector('.save-server-btn');
+
+      saveServerBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.downloadVersionToServer(card.dataset.versionId, false);
+      });
     });
 
     this.versionsList.querySelectorAll('.copy-code').forEach(code => {
@@ -585,64 +586,143 @@ class IPAToolUI {
   }
 
   async downloadVersion(versionId, purchaseIfNeeded) {
+    return this.startDownloadJob(versionId, purchaseIfNeeded, false);
+  }
+
+  // Downloads straight to a folder on the machine running the server
+  // (~/Downloads/IPATool), never sent over HTTP to the browser at all. For
+  // browsers that can't reliably receive a file download - Mobile Safari on
+  // iOS 6 appears to be one of these, even with the hidden-iframe handoff
+  // used by the normal download path - this is the only download path that
+  // actually results in a usable file.
+  async downloadVersionToServer(versionId, purchaseIfNeeded) {
+    return this.startDownloadJob(versionId, purchaseIfNeeded, true);
+  }
+
+  async startDownloadJob(versionId, purchaseIfNeeded, saveToServerFolder) {
     const payload = {
       externalVersionId: versionId
     };
     if (this.currentAppId) payload.appId = this.currentAppId;
     if (this.currentBundleId) payload.bundleId = this.currentBundleId;
+    if (this.currentPlatform) payload.platform = this.currentPlatform;
     if (purchaseIfNeeded) payload.purchaseIfNeeded = true;
+    if (saveToServerFolder) payload.saveToServerFolder = true;
 
     try {
-      this.showToast('Starting download...');
+      this.showToast(saveToServerFolder ? 'Starting server-side download...' : 'Starting download...');
       this.showDownloadProgress('Preparing download...');
-      
-      const response = await fetch(this.apiUrl('/api/download-stream'), {
+
+      // Previously this did the whole Apple download + zip patch inside one
+      // fetch() and buffered the entire result as a Blob before saving -
+      // meaning zero progress feedback for however long that took (often
+      // minutes), a connection that had to stay open the whole time, and
+      // the full IPA held in browser memory at once. Now the server does
+      // the work in a background job we poll for real byte progress, and
+      // the finished file is handed to the browser as a plain download
+      // (hidden iframe navigation) instead of a buffered Blob - or, if
+      // saveToServerFolder is set, left in a folder on the server and never
+      // sent over HTTP at all.
+      const startResponse = await fetch(this.apiUrl('/api/download-jobs'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Download failed');
+      const startData = await startResponse.json();
+      if (!startResponse.ok || !startData.jobId) {
+        throw new Error(startData.error || 'Download failed');
       }
-      
-      // Get filename from Content-Disposition header or generate one
-      const contentDisposition = response.headers.get('Content-Disposition');
-      let filename = 'app.ipa';
-      if (contentDisposition) {
-        const match = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-        if (match && match[1]) {
-          filename = match[1].replace(/['"]/g, '');
-        }
-      }
-      
-      this.updateDownloadProgress('Downloading...', filename);
-      
-      // Create blob from response
-      const blob = await response.blob();
-      
-      this.updateDownloadProgress('Saving file...', filename);
-      
-      // Create download link and trigger download
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      
-      // Cleanup
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-      
-      this.hideDownloadProgress();
-      this.showToast(`Downloaded: ${filename}`);
+
+      await this.pollDownloadJob(startData.jobId, saveToServerFolder);
     } catch (error) {
       this.hideDownloadProgress();
       this.showToast(error.message || 'Download failed', true);
     }
+  }
+
+  pollDownloadJob(jobId, saveToServerFolder) {
+    return new Promise((resolve) => {
+      let filename = 'app.ipa';
+      const poll = async () => {
+        let job;
+        try {
+          const response = await fetch(this.apiUrl(`/api/download-jobs/${jobId}`));
+          if (response.status === 404) {
+            this.hideDownloadProgress();
+            this.showToast('Download failed', true);
+            resolve();
+            return;
+          }
+          job = await response.json();
+        } catch (error) {
+          this.hideDownloadProgress();
+          this.showToast('Download failed', true);
+          resolve();
+          return;
+        }
+
+        if (job.filename) filename = job.filename;
+
+        if (job.status === 'error') {
+          this.hideDownloadProgress();
+          this.showToast(job.error || 'Download failed', true);
+          resolve();
+          return;
+        }
+
+        if (job.status === 'ready') {
+          if (saveToServerFolder) {
+            this.hideDownloadProgress();
+            this.showToast(`Saved on server: ${job.serverPath || filename}`);
+            resolve();
+            return;
+          }
+          this.updateDownloadProgress('Saving file...', filename);
+          this.fetchFileViaHiddenIframe(this.apiUrl(`/api/download-jobs/${jobId}/file`));
+          setTimeout(() => {
+            this.hideDownloadProgress();
+            this.showToast(`Downloading: ${filename}`);
+          }, 800);
+          resolve();
+          return;
+        }
+
+        if (job.phase === 'patching' || job.phase === 'finalizing') {
+          // The raw download already finished (100%); the server is now
+          // rewriting the whole package on its own CPU to add metadata and
+          // inject the SINF signature. This is genuinely slow for big apps
+          // on weak hardware and used to be totally invisible here - it
+          // just looked stuck at 100% with no explanation.
+          let label = job.phase === 'patching' ? 'Patching package...' : 'Finalizing (adding signature)...';
+          if (job.itemsTotal) {
+            label += ` ${job.itemsDone} / ${job.itemsTotal} files`;
+          }
+          this.updateDownloadProgress(label, filename);
+        } else if (job.bytesTotal) {
+          const percent = Math.floor((job.bytesDone / job.bytesTotal) * 100);
+          const done = (job.bytesDone / 1024 / 1024).toFixed(1);
+          const total = (job.bytesTotal / 1024 / 1024).toFixed(1);
+          this.updateDownloadProgress(`${percent}% (${done} MB / ${total} MB)`, filename);
+        } else if (job.bytesDone) {
+          this.updateDownloadProgress(`Downloading... ${(job.bytesDone / 1024 / 1024).toFixed(1)} MB`, filename);
+        } else {
+          this.updateDownloadProgress('Preparing download...', filename);
+        }
+
+        setTimeout(poll, 1500);
+      };
+      poll();
+    });
+  }
+
+  fetchFileViaHiddenIframe(url) {
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+    setTimeout(() => {
+      iframe.remove();
+    }, 60000);
   }
 
   showDownloadProgress(message, filename = '') {

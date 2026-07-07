@@ -72,6 +72,8 @@ def _normalize_plist_body(body: bytes) -> bytes:
     return normalized
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from . import constants
 from .cookie_store import CookieStore
@@ -164,6 +166,24 @@ class HTTPClient:
         self.session.verify = verify
         cookie_store.attach_to(self.session)
 
+        # Transport-level retries (connection resets, DNS hiccups, and 429/502/503
+        # from Apple's endpoints) - ported from ipatool-py, which mounts the exact
+        # same Retry() config on both http:// and https://. Without this, every
+        # transient hiccup (very common on Apple's servers) bubbled up as a hard
+        # failure with no automatic recovery.
+        retry_strategy = Retry(
+            connect=constants.RETRY_CONNECT,
+            read=constants.RETRY_READ,
+            status=constants.RETRY_STATUS,
+            allowed_methods=None,  # retry POST too - Apple's plist calls are safe to resend
+            status_forcelist=constants.RETRY_STATUS_FORCELIST,
+            backoff_factor=constants.RETRY_BACKOFF_FACTOR,
+            respect_retry_after_header=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
     def send(self, request: HTTPRequest) -> HTTPResult:
         data: Optional[bytes] = None
         headers: MutableMapping[str, str] = dict(request.headers)
@@ -184,6 +204,10 @@ class HTTPClient:
             headers=headers,
             data=data,
             allow_redirects=request.follow_redirects,
+            # No timeout here previously meant a stalled connection to Apple's
+            # servers would hang the request forever instead of failing fast
+            # and letting the retry adapter (or caller) recover.
+            timeout=(constants.DEFAULT_CONNECT_TIMEOUT, constants.DEFAULT_READ_TIMEOUT),
         )
         #(f"HTTP {response.status_code} {request.method} {request.url} {response.reason}")
         #print(f"Request headers sent: {dict(response.request.headers)}")
@@ -228,6 +252,10 @@ class HTTPClient:
         )
 
     def raw_request(self, method: str, url: str, **kwargs) -> requests.Response:
+        # Read timeout applies between chunks of a streamed response, so a
+        # stalled download (server stops sending bytes without closing the
+        # connection) is detected and can be retried instead of hanging.
+        kwargs.setdefault("timeout", (constants.DEFAULT_CONNECT_TIMEOUT, constants.DOWNLOAD_READ_TIMEOUT))
         response = self.session.request(method=method, url=url, **kwargs)
         self._cookie_store.save()
         return response

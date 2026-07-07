@@ -38,6 +38,25 @@ HTTP_HEADER_POD = "pod"
 PRICING_PARAM_APPSTORE = "STDQ"
 PRICING_PARAM_ARCADE = "GAME"
 
+# --- Networking resilience -------------------------------------------------
+# ipatool-py explicitly times out stalled connections (its bag.xml call uses
+# timeout=15s, its file download uses DOWNLOAD_READ_TIMEOUT=25s) and mounts a
+# retrying HTTPAdapter on the session. Previously this project used
+# `requests` with *no* timeout at all, so a stalled/half-open connection to
+# Apple's servers (extremely common on their download CDN) would hang
+# forever instead of failing fast and retrying - this, not raw throughput,
+# was the actual cause of downloads that "never finish".
+DEFAULT_CONNECT_TIMEOUT = 10.0
+DEFAULT_READ_TIMEOUT = 30.0
+DOWNLOAD_READ_TIMEOUT = 25.0
+
+# Mirrors ipatool-py's urllib3 Retry() config mounted on its session.
+RETRY_CONNECT = 4
+RETRY_READ = 4
+RETRY_STATUS = 20
+RETRY_STATUS_FORCELIST = (429, 502, 503)
+RETRY_BACKOFF_FACTOR = 1.0
+
 STORE_FRONTS = {
     "AE": "143481",
     "AG": "143540",

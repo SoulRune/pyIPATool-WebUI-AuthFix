@@ -37,12 +37,17 @@
       <label>Limit
         <input type="number" name="limit" value="3" min="1" max="50">
       </label>
-      <label class="checkbox">
-        <input type="checkbox" name="includeTvos" id="tvos-checkbox"> Include tvOS
+      <label>Platform
+        <select name="platform" id="platform-select">
+          <option value="">iPhone + iPad</option>
+          <option value="iphone">iPhone only</option>
+          <option value="ipad">iPad only</option>
+          <option value="appletv">Apple TV</option>
+        </select>
       </label>
       <button type="submit">Search</button>
     </form>
-    <p id="tvos-hint" class="hint" style="margin-top: 1rem;" hidden>💡 Tip: Searching with tvOS enabled finds tvOS apps, but versions shown will be iOS by default. Use Direct Lookup with a tvOS Version ID to view related tvOS versions.</p>
+    <p id="platform-hint" class="hint" style="margin-top: 1rem;" hidden>💡 Apple TV: version list starts from the latest tvOS build (resolved separately from the iPhone/iPad build, since most apps share one App Store listing across platforms). Older tvOS versions show up if Apple still serves them from that same version chain.</p>
     <div id="search-results" hidden></div>
   </div>
 
@@ -56,6 +61,14 @@
         <input type="text" name="bundleId" placeholder="com.example.app">
       </label>
       <div style="border-top: 1px solid rgba(148, 163, 184, 0.2); margin: 0.5rem 0;"></div>
+      <label>Platform
+        <select name="platform" id="direct-platform-select">
+          <option value="">iPhone + iPad</option>
+          <option value="iphone">iPhone only</option>
+          <option value="ipad">iPad only</option>
+          <option value="appletv">Apple TV</option>
+        </select>
+      </label>
       <label>Version ID (optional filter)
         <input type="text" name="externalVersionId" placeholder="Filter by specific version ID">
       </label>

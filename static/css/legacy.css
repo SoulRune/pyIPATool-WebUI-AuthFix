@@ -1,0 +1,609 @@
+/*
+ * legacy.css
+ *
+ * Visual port of style.css for old WebKit browsers (target: Mobile Safari on
+ * iOS 6). Deliberately avoids features that iOS 6 either lacks entirely or
+ * implements in a buggy/partial way:
+ *   - CSS custom properties (var(--accent))  -> not supported at all pre iOS 9.3
+ *   - CSS Grid (display: grid)               -> not supported pre iOS 10.3
+ *   - Modern Flexbox (display: flex, gap)     -> unreliable/partial in iOS 6.x
+ *   - backdrop-filter                         -> not supported pre iOS 9
+ * Layout is done with float / inline-block / classic dt-dd instead of
+ * flex/grid, and gradients/animations/transitions get -webkit- prefixes.
+ */
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: #0f172a;
+  color: #f8fafc;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+/* Simple clearfix, used everywhere a float-based row needs to contain floats */
+.clearfix:before,
+.clearfix:after,
+.container:before,
+.container:after {
+  content: "";
+  display: table;
+}
+.clearfix:after,
+.container:after {
+  clear: both;
+}
+
+h1, h2 {
+  font-weight: bold;
+  margin: 0 0 1rem;
+}
+
+.legacy-badge {
+  display: inline-block;
+  font-size: 0.6em;
+  font-weight: normal;
+  vertical-align: middle;
+  padding: 0.2em 0.6em;
+  border-radius: 999px;
+  -webkit-border-radius: 999px;
+  background: #334155;
+  color: #93c5fd;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+}
+
+/* Vertical spacing between top-level sections, replaces .container's flex gap */
+.container > * {
+  margin-bottom: 1.5rem;
+}
+.container > *:last-child {
+  margin-bottom: 0;
+}
+
+.card {
+  background: #1e293b;
+  border-radius: 16px;
+  -webkit-border-radius: 16px;
+  padding: 1.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.4);
+  -webkit-box-shadow: 0 16px 32px rgba(15, 23, 42, 0.4);
+}
+
+/* form-grid: stacked labels, replaces `display:grid;gap:1rem` */
+.form-grid {
+  display: block;
+}
+.form-grid > * {
+  margin-bottom: 1rem;
+}
+.form-grid > *:last-child {
+  margin-bottom: 0;
+}
+
+/* form-inline: labels/inputs/button flow left to right and wrap naturally
+   because they're inline-block, replacing `display:flex;flex-wrap:wrap;gap` */
+.form-inline {
+  display: block;
+}
+.form-inline > * {
+  display: inline-block;
+  vertical-align: top;
+  margin: 0 0.75rem 0.75rem 0;
+}
+
+label {
+  display: block;
+  font-size: 0.95rem;
+  margin-bottom: 0.25rem;
+}
+
+label input,
+label select {
+  display: block;
+  margin-top: 0.25rem;
+}
+
+label.checkbox {
+  display: inline-block;
+}
+label.checkbox input {
+  display: inline;
+  margin: 0 0.5rem 0 0;
+  vertical-align: middle;
+}
+
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"] {
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  -webkit-border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  background: rgba(15, 23, 42, 0.8);
+  color: #f8fafc;
+  -webkit-appearance: none;
+}
+
+input:focus {
+  outline: 2px solid #3478f6;
+  border-color: transparent;
+}
+
+button {
+  padding: 0.7rem 1.4rem;
+  border-radius: 999px;
+  -webkit-border-radius: 999px;
+  border: none;
+  background: #3478f6;
+  color: #fff;
+  font-weight: bold;
+  cursor: pointer;
+  -webkit-appearance: none;
+}
+
+button.secondary {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+}
+
+button.small {
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+}
+
+.status-box {
+  margin-top: 1rem;
+  padding: 1rem;
+  border-radius: 12px;
+  -webkit-border-radius: 12px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  font-size: 0.95rem;
+}
+
+/* dt/dd two-column layout, replaces `display:grid;grid-template-columns` */
+.status-box dl,
+.version-details dl {
+  margin: 0 0 1rem;
+}
+.status-box dl:after,
+.version-details dl:after {
+  content: "";
+  display: table;
+  clear: both;
+}
+.status-box dt,
+.version-details dt {
+  float: left;
+  clear: left;
+  width: 110px;
+  font-weight: 500;
+  color: rgba(226, 232, 240, 0.9);
+  margin: 0 0 0.5rem;
+}
+.status-box dd,
+.version-details dd {
+  margin: 0 0 0.5rem 120px;
+  word-wrap: break-word;
+}
+
+.status-box h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
+  font-weight: bold;
+}
+
+.table-wrapper {
+  margin-top: 1rem;
+  max-height: 320px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+thead {
+  background: rgba(148, 163, 184, 0.1);
+}
+
+th, td {
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.hint {
+  color: rgba(226, 232, 240, 0.7);
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.hint.center {
+  text-align: center;
+  margin: 0.5rem 0;
+}
+
+.subtitle {
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 0.95rem;
+  margin: 0.25rem 0 0;
+}
+
+/* tab-group: buttons are inline-block by default, no flex needed */
+.tab-group {
+  margin-bottom: 1.5rem;
+  border-bottom: 2px solid rgba(148, 163, 184, 0.2);
+}
+.tab-group:after {
+  content: "";
+  display: table;
+  clear: both;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  padding: 0.75rem 1.25rem;
+  color: rgba(226, 232, 240, 0.7);
+  font-weight: 500;
+  border-radius: 0;
+  -webkit-border-radius: 0;
+}
+
+.tab-btn.active {
+  color: #3478f6;
+  border-bottom-color: #3478f6;
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+.app-card {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 12px;
+  -webkit-border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+  cursor: pointer;
+}
+
+.app-card-header:after {
+  content: "";
+  display: table;
+  clear: both;
+}
+
+.app-card-title {
+  font-weight: bold;
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.app-card-meta > span {
+  display: inline-block;
+  margin-right: 1.5rem;
+  font-size: 0.9rem;
+  color: rgba(226, 232, 240, 0.7);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  -webkit-border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  background: rgba(52, 120, 246, 0.15);
+  color: #60a5fa;
+}
+
+.copy-code {
+  display: inline-block;
+  padding: 0.2rem 0.5rem;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  -webkit-border-radius: 6px;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 0.85rem;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.copy-icon {
+  font-size: 0.9rem;
+}
+
+.version-card {
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  -webkit-border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.version-card.expanded {
+  background: rgba(15, 23, 42, 0.7);
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+/* version-header: basic info left, expand icon right, replaces
+   `display:flex;justify-content:space-between` */
+.version-header {
+  cursor: pointer;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+}
+.version-header:after {
+  content: "";
+  display: table;
+  clear: both;
+}
+
+.version-basic {
+  float: left;
+  font-size: 0.95rem;
+}
+.version-basic > div {
+  display: inline-block;
+  margin-right: 1.5rem;
+  vertical-align: top;
+}
+
+.version-basic strong {
+  color: rgba(226, 232, 240, 0.8);
+  font-weight: 500;
+}
+
+.expand-icon {
+  float: right;
+  color: rgba(148, 163, 184, 0.6);
+}
+
+.version-card.expanded .expand-icon {
+  /* No rotate transform fallback needed visually; swap glyph via JS if
+     desired. Keep static to avoid relying on CSS transforms. */
+  color: #3478f6;
+}
+
+.version-details {
+  display: none;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.version-card.expanded .version-details {
+  display: block;
+}
+
+.version-actions button {
+  margin-right: 0.75rem;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: rgba(226, 232, 240, 0.6);
+}
+
+.empty-state-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+/* Simple spinner, -webkit- prefixed keyframes/animation for old WebKit */
+.loading {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid rgba(148, 163, 184, 0.3);
+  border-top-color: #3478f6;
+  border-radius: 50%;
+  -webkit-border-radius: 50%;
+  -webkit-animation: legacy-spin 0.6s linear infinite;
+  animation: legacy-spin 0.6s linear infinite;
+}
+
+button.downloading {
+  position: relative;
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+@-webkit-keyframes legacy-spin {
+  from { -webkit-transform: rotate(0deg); }
+  to { -webkit-transform: rotate(360deg); }
+}
+@keyframes legacy-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* download-progress: spinner + text side by side, replaces `display:flex`.
+   backdrop-filter is dropped (unsupported); the solid background already
+   matches the visual closely enough without it. */
+.download-progress {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 12px;
+  -webkit-border-radius: 12px;
+  padding: 1rem 1.5rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  -webkit-box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  z-index: 9998;
+  min-width: 250px;
+}
+.download-progress:after {
+  content: "";
+  display: table;
+  clear: both;
+}
+
+.download-progress-spinner {
+  float: left;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-right: 1rem;
+  border: 3px solid rgba(148, 163, 184, 0.3);
+  border-top-color: #3478f6;
+  border-radius: 50%;
+  -webkit-border-radius: 50%;
+  -webkit-animation: legacy-spin 0.8s linear infinite;
+  animation: legacy-spin 0.8s linear infinite;
+}
+
+.download-progress-text {
+  font-size: 0.95rem;
+  font-weight: 500;
+  overflow: hidden;
+}
+
+.download-progress-filename {
+  font-size: 0.85rem;
+  color: rgba(226, 232, 240, 0.7);
+  margin-top: 0.25rem;
+  word-wrap: break-word;
+}
+
+#toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  margin-left: -140px;
+  width: 280px;
+  background: #1e293b;
+  color: #f8fafc;
+  padding: 0.85rem 1.5rem;
+  border-radius: 12px;
+  -webkit-border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(148, 163, 184, 0.3);
+  -webkit-box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(148, 163, 184, 0.3);
+  z-index: 9999;
+  font-weight: 500;
+  font-size: 0.95rem;
+  text-align: center;
+  box-sizing: border-box;
+  -webkit-box-sizing: border-box;
+}
+
+/* Solid background first as a safe fallback, prefixed gradient layered on
+   top for browsers that support it (iOS 6 Mobile Safari does). */
+#toast.success {
+  background-color: #059669;
+  background-image: -webkit-linear-gradient(135deg, #10b981 0%, #059669 100%);
+  background-image: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  box-shadow: 0 10px 30px rgba(16, 185, 129, 0.3), 0 0 0 1px rgba(16, 185, 129, 0.5);
+  -webkit-box-shadow: 0 10px 30px rgba(16, 185, 129, 0.3), 0 0 0 1px rgba(16, 185, 129, 0.5);
+}
+
+#toast.error {
+  background-color: #dc2626;
+  background-image: -webkit-linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  background-image: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  box-shadow: 0 10px 30px rgba(239, 68, 68, 0.3), 0 0 0 1px rgba(239, 68, 68, 0.5);
+  -webkit-box-shadow: 0 10px 30px rgba(239, 68, 68, 0.3), 0 0 0 1px rgba(239, 68, 68, 0.5);
+}
+
+#toast.info {
+  background-color: #2563eb;
+  background-image: -webkit-linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  background-image: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  box-shadow: 0 10px 30px rgba(59, 130, 246, 0.3), 0 0 0 1px rgba(59, 130, 246, 0.5);
+  -webkit-box-shadow: 0 10px 30px rgba(59, 130, 246, 0.3), 0 0 0 1px rgba(59, 130, 246, 0.5);
+}
+
+/* Modal overlay + centered box, all float/inline-block based */
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(15, 23, 42, 0.75);
+  z-index: 9997;
+  text-align: center;
+  padding: 3rem 1rem;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.modal[hidden] {
+  display: none;
+}
+
+.modal-content {
+  display: inline-block;
+  width: 100%;
+  max-width: 380px;
+  text-align: left;
+  background: #1e293b;
+  border-radius: 16px;
+  -webkit-border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.4);
+  -webkit-box-shadow: 0 16px 32px rgba(15, 23, 42, 0.4);
+  padding: 1.5rem;
+  box-sizing: border-box;
+  -webkit-box-sizing: border-box;
+}
+
+.modal-content h3 {
+  margin: 0 0 0.75rem;
+}
+
+.modal-actions {
+  margin-top: 1rem;
+}
+.modal-actions button {
+  margin-right: 0.75rem;
+}
+
+.error-text {
+  color: #f87171;
+  font-size: 0.9rem;
+  margin: 0.5rem 0 0;
+}
+
+[hidden] {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .container {
+    padding: 1.5rem 1rem;
+  }
+
+  table {
+    font-size: 0.9rem;
+  }
+
+  .modal-content {
+    max-width: none;
+  }
+}

@@ -102,6 +102,33 @@ class ListVersionsOutput:
 
 
 @dataclass(slots=True)
+class CommunityVersionEntry:
+    """One entry from a third-party, crowd-sourced version-history database
+    (currently: Timbrd, api.timbrd.com/apple/app-version/index.php). This is
+    NOT an official Apple API - see AppStoreService.list_versions_community
+    for the caveats."""
+
+    external_version_id: str
+    bundle_version: str
+    created_at: Optional[str] = None
+    size: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "externalVersionId": self.external_version_id,
+            "bundleVersion": self.bundle_version,
+            "createdAt": self.created_at,
+            "size": self.size,
+        }
+
+
+@dataclass(slots=True)
+class CommunityVersionsOutput:
+    source: str
+    entries: List[CommunityVersionEntry] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class GetVersionMetadataOutput:
     display_version: str
     build_number: str

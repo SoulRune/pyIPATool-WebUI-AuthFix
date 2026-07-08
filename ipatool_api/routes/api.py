@@ -27,23 +27,27 @@ def _service() -> AppStoreService:
 
 
 def _send_file_and_cleanup(file_path: Path, filename: str, extra_cleanup=None) -> Response:
-    """Stream a file to the client and delete it afterwards.
+    """Stream a file to the client.
 
-    Deliberately NOT using send_file()+call_on_close(): on Windows you can't
-    delete a file while any handle to it is still open (unlike POSIX, where
-    unlink() on an open file just removes the directory entry and the data
-    is freed once the last handle closes). send_file()'s own file handle,
-    plus timing in the WSGI layer around when call_on_close actually fires,
-    left a window where unlink() raised PermissionError ([WinError 32]) -
-    which the old code silently swallowed with `except Exception: pass`, so
-    the delete just failed forever with no retry and no visible error. Files
-    piled up in temp_downloads/ on Windows even though the same code worked
-    fine on Linux/macOS.
+    Deliberately does NOT delete the file immediately after this response
+    finishes. Some browsers' download managers (observed: Orion on iOS) make
+    more than one request to a download URL before actually committing to
+    save it - e.g. a quick check followed by the real fetch. Deleting the
+    file after the first request served it out from under the second one,
+    which 404's and shows as an immediate "failed" download with no
+    filename (since the browser never got far enough to read
+    Content-Disposition). The existing 30-minute job TTL sweep
+    (DownloadJobRegistry._sweep) still cleans the file up - this just stops
+    racing a possible second fetch attempt against our own cleanup.
 
-    Here we open/read/close the file ourselves via `with open(...)`, so by
-    the time we try to delete it our own handle is guaranteed closed - no
-    race with the framework's handle-closing timing - and we still retry a
-    few times with backoff to absorb any brief residual OS/antivirus lock.
+    Also deliberately NOT using send_file()+call_on_close(): on Windows you
+    can't delete a file while any handle to it is still open (unlike POSIX,
+    where unlink() on an open file just removes the directory entry and the
+    data is freed once the last handle closes). We still stream via our own
+    `with open(...)` (rather than send_file) so our own handle is always
+    closed promptly regardless of framework timing quirks, even though nothing
+    here deletes the file anymore - if extra_cleanup is provided it still runs
+    after the stream finishes for callers that need it.
     """
 
     def generate():
@@ -55,17 +59,6 @@ def _send_file_and_cleanup(file_path: Path, filename: str, extra_cleanup=None) -
                         break
                     yield chunk
         finally:
-            for attempt in range(5):
-                try:
-                    file_path.unlink(missing_ok=True)
-                    break
-                except PermissionError:
-                    # Windows: something (AV scan, a lingering handle) still
-                    # has it open for a moment - back off and retry instead
-                    # of silently giving up.
-                    time.sleep(0.3 * (attempt + 1))
-                except Exception:
-                    break
             if extra_cleanup is not None:
                 try:
                     extra_cleanup()
@@ -381,11 +374,15 @@ def fetch_download_job_file(job_id: str):
     if not file_path.exists():
         return jsonify({"error": "file not found"}), HTTPStatus.NOT_FOUND
 
-    return _send_file_and_cleanup(
-        file_path,
-        job.filename or file_path.name,
-        extra_cleanup=lambda: download_jobs.remove(job_id),
-    )
+    # Deliberately does not remove the job or delete the file immediately
+    # after serving - some browsers' download managers (observed: Orion on
+    # iOS) make more than one request to a download URL before committing
+    # to save it. Removing the job entry (or the file) after the first
+    # request served it out from under a second one, which 404's and shows
+    # up as an instant "failed" download with no filename. The existing
+    # 30-minute job TTL sweep (DownloadJobRegistry._sweep) still cleans
+    # both up.
+    return _send_file_and_cleanup(file_path, job.filename or file_path.name)
 
 
 @api_bp.get("/versions")
@@ -400,6 +397,25 @@ def list_versions():
         {
             "latestExternalVersionId": output.latest_external_version_id,
             "externalVersionIdentifiers": output.external_version_identifiers,
+        }
+    )
+
+
+@api_bp.get("/versions/community")
+def list_versions_community():
+    """Version list from a third-party, crowd-sourced database (Timbrd),
+    independent of the requesting Apple ID's own eligibility with Apple's
+    servers. Separate, opt-in path - see AppStoreService.list_versions_community
+    for details/caveats. The actual .ipa is still fetched through the
+    normal, official download flow once you have an external_version_id."""
+    params = request.args or {}
+    account = _service().account_info()
+    app = _resolve_app(params, account)
+    output = _service().list_versions_community(app)
+    return jsonify(
+        {
+            "source": output.source,
+            "entries": [entry.to_dict() for entry in output.entries],
         }
     )
 

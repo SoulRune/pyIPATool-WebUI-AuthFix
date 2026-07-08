@@ -18,6 +18,8 @@
   var versionsList;
   var appTitle;
   var appSubtitle;
+  var communityFallbackCheckbox;
+  var directCommunityFallbackCheckbox;
   var searchTab;
   var directTab;
   var tabButtons;
@@ -31,6 +33,7 @@
   var downloadProgressFilename;
   var pendingCredentials = null;
   var lastSearchPlatform = '';
+  var lastSearchCommunityFallback = false;
   var currentAppId = null;
   var currentBundleId = null;
   var currentPlatform = '';
@@ -499,7 +502,7 @@
         }
         var appId = this.getAttribute('data-app-id');
         var bundleId = this.getAttribute('data-bundle-id');
-        loadAppVersions(appId, bundleId, null, lastSearchPlatform);
+        loadAppVersions(appId, bundleId, null, lastSearchPlatform, lastSearchCommunityFallback);
         return false;
       };
     }
@@ -527,6 +530,7 @@
     if (lastSearchPlatform) {
       params.push('platform=' + encodeURIComponent(lastSearchPlatform));
     }
+    lastSearchCommunityFallback = formData.communityFallback === 'on';
 
     showToast('Searching...');
     sendRequest('GET', apiUrl('/api/search') + '?' + params.join('&'), null, function (response) {
@@ -538,7 +542,7 @@
     });
   }
 
-  function loadAppVersions(appId, bundleId, externalVersionId, platform) {
+  function loadAppVersions(appId, bundleId, externalVersionId, platform, communityFallback) {
     currentAppId = appId || null;
     currentBundleId = bundleId || null;
     currentExternalVersionId = externalVersionId || null;
@@ -547,6 +551,8 @@
     if (!versionsSection || !versionsList) {
       return;
     }
+
+    var communityFallbackEnabled = !!communityFallback;
 
     if (appTitle) {
       appTitle.textContent = 'Loading...';
@@ -581,6 +587,11 @@
         var body = response.body || {};
         var errorText = body.error || 'Unable to load versions';
         var metadata = body.metadata || {};
+
+        // Genuine "you don't own this yet" - always the normal license
+        // flow, regardless of the community-fallback toggle. Falling back
+        // to Timbrd here would just paper over a license Apple is telling
+        // us outright is missing.
         var isLicenseError = body.licenseRequired || (body.error && body.error.toLowerCase().indexOf('license') !== -1) || metadata.failureType === '9610';
         if (isLicenseError) {
           if (purchaseModal) {
@@ -593,6 +604,17 @@
           }
           return;
         }
+
+        // The Chrome-style "5002 / m-allowed:false" signature: Apple's
+        // generic refusal that isn't really about licensing (can persist
+        // even after a successful purchase). Only worth trying Timbrd for
+        // this specific, confirmed pattern.
+        if (communityFallbackEnabled && metadata.failureType === '5002' && metadata['m-allowed'] === false) {
+          showToast('Apple refused this app (not a licensing issue) - trying the community database instead...');
+          loadAppVersionsFromCommunity(currentAppId, currentBundleId);
+          return;
+        }
+
         showToast(errorText, true);
         versionsList.innerHTML = '<div class="empty-state"><p>' + errorText + '</p></div>';
         return;
@@ -768,6 +790,67 @@
     }
   }
 
+  function loadAppVersionsFromCommunity(appId, bundleId) {
+    var params = [];
+    if (appId) {
+      params.push('appId=' + encodeURIComponent(appId));
+    }
+    if (bundleId) {
+      params.push('bundleId=' + encodeURIComponent(bundleId));
+    }
+
+    if (appTitle) {
+      appTitle.textContent = 'Loading...';
+    }
+    if (appSubtitle) {
+      appSubtitle.textContent = '';
+    }
+    versionsList.innerHTML = '<div style="text-align:center;padding:2rem;"><div class="loading"></div><div class="hint" style="margin-top:1rem;">Loading community versions...</div></div>';
+    setElementHidden(versionsSection, false);
+
+    var url = apiUrl('/api/versions/community');
+    if (params.length > 0) {
+      url += '?' + params.join('&');
+    }
+
+    sendRequest('GET', url, null, function (response) {
+      if (response.status >= 400 || !response.body) {
+        var body = response.body || {};
+        var errorText = body.error || 'Failed to load community versions';
+        showToast(errorText, true);
+        versionsList.innerHTML = '<div class="empty-state"><p>' + errorText + '</p></div>';
+        return;
+      }
+
+      var entries = response.body.entries || [];
+      if (appTitle) {
+        appTitle.textContent = 'App Versions';
+      }
+      if (appSubtitle) {
+        appSubtitle.textContent = 'Community database (Timbrd) \u2022 ' + entries.length + ' version' + (entries.length === 1 ? '' : 's');
+      }
+      renderCommunityVersions(entries);
+    });
+  }
+
+  function renderCommunityVersions(entries) {
+    if (!entries || entries.length === 0) {
+      versionsList.innerHTML = '<div class="empty-state"><p>No versions found in the community database</p></div>';
+      return;
+    }
+
+    var bundleIdText = currentBundleId || 'N/A';
+    var html = [];
+    for (var i = 0; i < entries.length; i += 1) {
+      var entry = entries[i];
+      var sizeText = entry.size ? (entry.size / (1024 * 1024)).toFixed(2) + ' MB' : 'Unknown';
+      var dateText = entry.createdAt || 'Unknown';
+      var vid = entry.externalVersionId || '';
+      html.push('<div class="version-card" data-version-id="' + vid + '"><div class="version-header"><div class="version-basic"><div><strong>Version:</strong> ' + (entry.bundleVersion || 'unknown') + '</div><div><strong>Build:</strong> N/A</div><div><strong>Size:</strong> ' + sizeText + '</div><div><strong>Seen:</strong> ' + dateText + '</div></div><span class="expand-icon">\u25BC</span></div><div class="version-details"><dl><dt>Version ID:</dt><dd><span class="copy-code" data-copy="' + vid + '" title="Click to copy Version ID">' + vid + '</span></dd><dt>Bundle ID:</dt><dd>' + bundleIdText + '</dd><dt>Source:</dt><dd>Community database (Timbrd) - not run or endorsed by Apple</dd></dl><div class="version-actions"><button type="button" class="download-version-btn" data-version-id="' + vid + '">Download IPA</button> <button type="button" class="save-server-btn secondary" data-version-id="' + vid + '" title="Save directly on the machine running the server, skip the browser download entirely">\uD83D\uDCBE Save on server</button></div></div></div>');
+    }
+    versionsList.innerHTML = html.join('');
+  }
+
   function copyLegacyText(text) {
     copyTextToClipboard(text);
   }
@@ -848,6 +931,69 @@
     }, 60000);
   }
 
+  // Some WebKit-based iOS browsers (observed: Orion, likely due to its
+  // built-in tracker/ad blocking flagging the hidden-iframe navigation
+  // pattern above as suspicious) fail to actually save the file even though
+  // the request succeeds - Safari handles the same trick fine. A real,
+  // visible link the user taps themselves is a much more reliable fallback,
+  // since genuine user-initiated navigation isn't what those blockers
+  // target.
+  function showManualDownloadLink(url, filename) {
+    var existing = byId('manual-download-banner');
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
+    }
+
+    var banner = document.createElement('div');
+    banner.id = 'manual-download-banner';
+    // Deliberately avoids calc() and CSS transforms - neither is supported
+    // on iOS 6 Safari (calc() landed in iOS 7, and fixed-position elements
+    // combined with transforms render unpredictably on old WebKit). Uses
+    // the same fixed-width + negative-margin-left centering trick already
+    // proven working for #toast on this exact browser instead.
+    banner.style.cssText = 'position:fixed;bottom:20px;left:50%;margin-left:-150px;width:300px;background:#1e293b;border:1px solid rgba(148,163,184,0.3);border-radius:12px;-webkit-border-radius:12px;padding:0.85rem 1rem;box-shadow:0 10px 30px rgba(0,0,0,0.4);-webkit-box-shadow:0 10px 30px rgba(0,0,0,0.4);z-index:9998;font-size:0.9rem;color:#f8fafc;box-sizing:border-box;-webkit-box-sizing:border-box;';
+
+    var header = document.createElement('div');
+    header.style.cssText = 'display:-webkit-box;-webkit-box-align:start;-webkit-box-pack:justify;margin-bottom:0.6rem;';
+
+    var label = document.createElement('div');
+    label.style.cssText = 'color:rgba(226,232,240,0.8);line-height:1.3;-webkit-box-flex:1;';
+    label.appendChild(document.createTextNode("If the download didn't start automatically:"));
+
+    var closeBtn = document.createElement('button');
+    closeBtn.setAttribute('type', 'button');
+    closeBtn.setAttribute('aria-label', 'Dismiss');
+    closeBtn.appendChild(document.createTextNode('\u2715'));
+    closeBtn.style.cssText = 'width:28px;height:28px;line-height:26px;text-align:center;background:rgba(148,163,184,0.15);border:none;border-radius:50%;-webkit-border-radius:50%;color:rgba(226,232,240,0.8);cursor:pointer;font-size:0.9rem;padding:0;margin-left:0.75rem;';
+    closeBtn.onclick = function () {
+      if (banner.parentNode) {
+        banner.parentNode.removeChild(banner);
+      }
+    };
+
+    header.appendChild(label);
+    header.appendChild(closeBtn);
+
+    var link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    // word-wrap:break-word (not word-break:break-all) - much better old
+    // WebKit support for wrapping a long unbreakable filename.
+    link.style.cssText = 'display:block;color:#60a5fa;font-weight:600;text-decoration:none;word-wrap:break-word;line-height:1.4;';
+    link.appendChild(document.createTextNode('Tap to download: ' + filename));
+
+    banner.appendChild(header);
+    banner.appendChild(link);
+    document.body.appendChild(banner);
+
+    // Don't let it linger forever if it's never dismissed manually.
+    setTimeout(function () {
+      if (banner.parentNode) {
+        banner.parentNode.removeChild(banner);
+      }
+    }, 5 * 60 * 1000);
+  }
+
   function pollDownloadJob(jobId, filename, saveToServerFolder) {
     sendRequest('GET', apiUrl('/api/download-jobs/' + jobId), null, function (response) {
       var job = response.body || {};
@@ -874,8 +1020,10 @@
           showToast('Saved on server: ' + (job.serverPath || filename));
           return;
         }
+        var fileUrl = apiUrl('/api/download-jobs/' + jobId + '/file');
         updateDownloadProgress('Saving file...', filename);
-        fetchFileViaHiddenIframe(apiUrl('/api/download-jobs/' + jobId + '/file'));
+        fetchFileViaHiddenIframe(fileUrl);
+        showManualDownloadLink(fileUrl, filename);
         // The iframe download is fire-and-forget from here (no progress
         // events are available for a plain navigation), so just let the
         // user know it has handed off to the browser.
@@ -1013,7 +1161,7 @@
       return false;
     }
 
-    loadAppVersions(formData.appId, formData.bundleId, formData.externalVersionId, formData.platform);
+    loadAppVersions(formData.appId, formData.bundleId, formData.externalVersionId, formData.platform, formData.communityFallback === 'on');
     return false;
   }
 
@@ -1205,6 +1353,8 @@
     versionsList = byId('versions-list');
     appTitle = byId('app-title');
     appSubtitle = byId('app-subtitle');
+    communityFallbackCheckbox = byId('community-fallback-checkbox');
+    directCommunityFallbackCheckbox = byId('direct-community-fallback-checkbox');
     searchTab = byId('search-tab');
     directTab = byId('direct-tab');
     var platformSelect = byId('platform-select');

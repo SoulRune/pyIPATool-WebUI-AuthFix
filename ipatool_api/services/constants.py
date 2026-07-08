@@ -9,8 +9,19 @@ DEFAULT_USER_AGENT = "Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWe
 
 FAILURE_INVALID_CREDENTIALS = "-5000"
 FAILURE_PASSWORD_TOKEN_EXPIRED = "2034"
+# Per majd/ipatool PR #448: token expiry is sometimes signaled via this
+# customer message instead of (or in addition to) failureType 2034 - without
+# checking for it too, some expiry cases fall through as a generic error
+# instead of triggering the normal re-login retry.
+CUSTOMER_MESSAGE_PASSWORD_CHANGED = "Your password has changed."
 FAILURE_LICENSE_NOT_FOUND = "9610"
 FAILURE_TEMPORARILY_UNAVAILABLE = "2059"
+# Apple's generic catch-all failure code - shows up (among other things) for
+# apps this account isn't currently eligible to get, for reasons unrelated
+# to licensing (confirmed observed for content requiring a newer OS than the
+# account's associated devices - see the Chrome investigation). Used only to
+# give a clearer error message, not to change control flow.
+FAILURE_UNKNOWN_ERROR = "5002"
 
 CUSTOMER_MESSAGE_BAD_LOGIN = "MZFinance.BadLogin.Configurator_message"
 CUSTOMER_MESSAGE_ACCOUNT_DISABLED = "Your account is disabled."

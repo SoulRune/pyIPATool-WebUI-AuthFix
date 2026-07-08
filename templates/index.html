@@ -45,6 +45,9 @@
           <option value="appletv">Apple TV</option>
         </select>
       </label>
+      <label class="checkbox" title="If Apple refuses an app for a reason unrelated to licensing (e.g. Chrome), automatically try an independent, crowd-sourced version database (Timbrd) instead. A genuine 'you need a license' response always goes through the normal purchase flow, never this.">
+        <input type="checkbox" name="communityFallback" id="community-fallback-checkbox"> Fall back to community DB (Timbrd)
+      </label>
       <button type="submit">Search</button>
     </form>
     <p id="platform-hint" class="hint" style="margin-top: 1rem;" hidden>💡 Apple TV: version list starts from the latest tvOS build (resolved separately from the iPhone/iPad build, since most apps share one App Store listing across platforms). Older tvOS versions show up if Apple still serves them from that same version chain.</p>
@@ -71,6 +74,9 @@
       </label>
       <label>Version ID (optional filter)
         <input type="text" name="externalVersionId" placeholder="Filter by specific version ID">
+      </label>
+      <label class="checkbox" title="If Apple refuses an app for a reason unrelated to licensing (e.g. Chrome), automatically try an independent, crowd-sourced version database (Timbrd) instead. A genuine 'you need a license' response always goes through the normal purchase flow, never this.">
+        <input type="checkbox" name="communityFallback" id="direct-community-fallback-checkbox"> Fall back to community DB (Timbrd)
       </label>
       <p class="hint">Provide an App ID or Bundle ID above. Optionally add a Version ID to filter related versions.</p>
       <button type="submit">Load Versions</button>

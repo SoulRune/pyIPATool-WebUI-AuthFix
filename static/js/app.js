@@ -38,6 +38,9 @@ class IPAToolUI {
     this.versionsList = document.querySelector('#versions-list');
     this.appTitle = document.querySelector('#app-title');
     this.appSubtitle = document.querySelector('#app-subtitle');
+    this.communityFallbackCheckbox = document.querySelector('#community-fallback-checkbox');
+    this.directCommunityFallbackCheckbox = document.querySelector('#direct-community-fallback-checkbox');
+    this.currentCommunityFallback = false;
     this.downloadProgress = document.querySelector('#download-progress');
     this.downloadProgressText = document.querySelector('#download-progress-text');
     this.downloadProgressFilename = document.querySelector('#download-progress-filename');
@@ -316,6 +319,7 @@ class IPAToolUI {
     if (formData.limit) params.set('limit', formData.limit);
     if (formData.platform) params.set('platform', formData.platform);
     this.lastSearchPlatform = formData.platform || '';
+    this.lastSearchCommunityFallback = !!formData.communityFallback;
 
     try {
       const response = await fetch(`${this.apiUrl('/api/search')}?${params.toString()}`);
@@ -367,7 +371,7 @@ class IPAToolUI {
         
         const appId = card.dataset.appId;
         const bundleId = card.dataset.bundleId;
-        this.loadAppVersions(appId, bundleId, null, this.lastSearchPlatform);
+        this.loadAppVersions(appId, bundleId, null, this.lastSearchPlatform, this.lastSearchCommunityFallback);
       });
     });
 
@@ -392,13 +396,15 @@ class IPAToolUI {
       this.showToast('Please provide App ID or Bundle ID', true);
       return;
     }
-    this.loadAppVersions(formData.appId, formData.bundleId, formData.externalVersionId, formData.platform);
+    this.loadAppVersions(formData.appId, formData.bundleId, formData.externalVersionId, formData.platform, !!formData.communityFallback);
   }
 
-  async loadAppVersions(appId, bundleId, externalVersionId = null, platform = '') {
+  async loadAppVersions(appId, bundleId, externalVersionId = null, platform = '', communityFallback = false) {
     this.currentAppId = appId;
     this.currentBundleId = bundleId;
     this.currentPlatform = platform || '';
+
+    const communityFallbackEnabled = !!communityFallback;
 
     const params = new URLSearchParams();
     if (appId) params.set('appId', appId);
@@ -415,14 +421,34 @@ class IPAToolUI {
       const response = await fetch(`${this.apiUrl('/api/versions')}?${params.toString()}`);
       const data = await response.json();
       if (!response.ok) {
-        // Check if it's a license error
-        if (data.error && data.error.includes('license') || data.metadata?.failureType === '9610') {
+        const failureType = data.metadata?.failureType;
+        const marketAllowed = data.metadata?.['m-allowed'];
+
+        // Genuine "you don't own this yet" - always the normal license flow,
+        // regardless of the community-fallback toggle. Falling back to
+        // Timbrd here would just paper over a license Apple is telling us
+        // outright is missing.
+        if (failureType === '9610' || (data.error && data.error.includes('license'))) {
           const shouldAcquire = confirm('A license is required to view versions for this app. Would you like to acquire it now?');
           if (shouldAcquire) {
             await this.acquireLicenseAndRetry(appId, bundleId, externalVersionId, this.currentPlatform);
             return;
           }
+          throw new Error(data.error || 'Failed to load versions');
         }
+
+        // The Chrome-style "5002 / m-allowed:false" signature: Apple's
+        // generic refusal that isn't really about licensing (can persist
+        // even after a successful purchase - see prior investigation).
+        // Only worth trying Timbrd for this specific, confirmed pattern -
+        // not for arbitrary other failures, which Timbrd data can't explain
+        // or fix anyway.
+        if (communityFallbackEnabled && failureType === '5002' && marketAllowed === false) {
+          this.showToast('Apple refused this app (not a licensing issue) - trying the community database instead...');
+          await this.loadAppVersionsFromCommunity(appId, bundleId);
+          return;
+        }
+
         throw new Error(data.error || 'Failed to load versions');
       }
 
@@ -433,6 +459,98 @@ class IPAToolUI {
       this.versionsList.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>${error.message}</p></div>`;
       this.versionsSection.hidden = true;
     }
+  }
+
+  async loadAppVersionsFromCommunity(appId, bundleId) {
+    const params = new URLSearchParams();
+    if (appId) params.set('appId', appId);
+    if (bundleId) params.set('bundleId', bundleId);
+
+    try {
+      this.versionsSection.hidden = false;
+      this.versionsList.innerHTML = '<div style="text-align:center;padding:2rem;"><div class="loading"></div></div>';
+      this.appTitle.textContent = 'Loading...';
+      this.appSubtitle.textContent = '';
+
+      const response = await fetch(`${this.apiUrl('/api/versions/community')}?${params.toString()}`);
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to load community versions');
+      }
+
+      const entries = Array.isArray(data.entries) ? data.entries : [];
+      this.appTitle.textContent = 'App Versions';
+      this.appSubtitle.textContent = `Community database (Timbrd) • ${entries.length} version${entries.length === 1 ? '' : 's'}`;
+      this.renderCommunityVersions(entries);
+    } catch (error) {
+      this.showToast(error.message || 'Failed to load community versions', true);
+      this.versionsList.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>${error.message}</p></div>`;
+    }
+  }
+
+  renderCommunityVersions(entries) {
+    if (entries.length === 0) {
+      this.versionsList.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📦</div><p>No versions found in the community database</p></div>';
+      return;
+    }
+
+    this.versionsList.innerHTML = entries.map(entry => {
+      const sizeText = entry.size ? `${(entry.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
+      const dateText = entry.createdAt || 'Unknown';
+      const bundleIdText = this.currentBundleId || 'N/A';
+      return `
+        <div class="version-card" data-version-id="${entry.externalVersionId}">
+          <div class="version-header">
+            <div class="version-basic">
+              <div><strong>Version:</strong> ${entry.bundleVersion || 'unknown'}</div>
+              <div><strong>Build:</strong> N/A</div>
+              <div><strong>Size:</strong> ${sizeText}</div>
+              <div><strong>Seen:</strong> ${dateText}</div>
+            </div>
+            <span class="expand-icon">▼</span>
+          </div>
+          <div class="version-details">
+            <dl>
+              <dt>Version ID:</dt>
+              <dd>
+                <span class="copy-code" data-copy="${entry.externalVersionId}" title="Click to copy Version ID">
+                  <span>${entry.externalVersionId}</span>
+                </span>
+              </dd>
+              <dt>Bundle ID:</dt><dd>${bundleIdText}</dd>
+              <dt>Source:</dt><dd>Community database (Timbrd) - not run or endorsed by Apple</dd>
+            </dl>
+            <div class="version-actions">
+              <button type="button" class="download-version-btn" data-version-id="${entry.externalVersionId}">Download IPA</button>
+              <button type="button" class="save-server-btn secondary" data-version-id="${entry.externalVersionId}" title="Save directly on the machine running the server, skip the browser download entirely">💾 Save on server</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    this.versionsList.querySelectorAll('.version-card').forEach(card => {
+      const header = card.querySelector('.version-header');
+      header.addEventListener('click', () => {
+        card.classList.toggle('expanded');
+      });
+
+      const downloadBtn = card.querySelector('.download-version-btn');
+      downloadBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.downloadVersion(downloadBtn.dataset.versionId, false);
+      });
+      const saveServerBtn = card.querySelector('.save-server-btn');
+      saveServerBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.downloadVersionToServer(saveServerBtn.dataset.versionId, false);
+      });
+      const copyCode = card.querySelector('.copy-code');
+      copyCode?.addEventListener('click', () => {
+        const text = copyCode.dataset.copy;
+        navigator.clipboard?.writeText(text).then(() => this.showToast(`Copied: ${text}`));
+      });
+    });
   }
 
   async acquireLicenseAndRetry(appId, bundleId, externalVersionId = null, platform = '') {
@@ -677,8 +795,10 @@ class IPAToolUI {
             resolve();
             return;
           }
+          const fileUrl = this.apiUrl(`/api/download-jobs/${jobId}/file`);
           this.updateDownloadProgress('Saving file...', filename);
-          this.fetchFileViaHiddenIframe(this.apiUrl(`/api/download-jobs/${jobId}/file`));
+          this.fetchFileViaHiddenIframe(fileUrl);
+          this.showManualDownloadLink(fileUrl, filename);
           setTimeout(() => {
             this.hideDownloadProgress();
             this.showToast(`Downloading: ${filename}`);
@@ -723,6 +843,52 @@ class IPAToolUI {
     setTimeout(() => {
       iframe.remove();
     }, 60000);
+  }
+
+  // Some WebKit-based iOS browsers (observed: Orion, likely due to its
+  // built-in tracker/ad blocking flagging the hidden-iframe navigation
+  // pattern above as suspicious) fail to actually save the file even though
+  // the request succeeds - Safari handles the same trick fine. A real,
+  // visible link the user taps themselves is a much more reliable fallback,
+  // since genuine user-initiated navigation isn't what those blockers
+  // target.
+  showManualDownloadLink(url, filename) {
+    const existing = document.querySelector('#manual-download-banner');
+    if (existing) existing.remove();
+
+    const banner = document.createElement('div');
+    banner.id = 'manual-download-banner';
+    banner.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e293b;border:1px solid rgba(148,163,184,0.3);border-radius:12px;padding:0.85rem 1rem;box-shadow:0 10px 30px rgba(0,0,0,0.4);z-index:9998;width:calc(100vw - 2.5rem);max-width:420px;font-size:0.9rem;color:#f8fafc;box-sizing:border-box;';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:flex-start;justify-content:space-between;gap:0.75rem;margin-bottom:0.6rem;';
+
+    const label = document.createElement('div');
+    label.style.cssText = 'color:rgba(226,232,240,0.8);line-height:1.3;';
+    label.textContent = "If the download didn't start automatically:";
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.setAttribute('aria-label', 'Dismiss');
+    closeBtn.textContent = '✕';
+    closeBtn.style.cssText = 'flex-shrink:0;width:28px;height:28px;line-height:26px;text-align:center;background:rgba(148,163,184,0.15);border:none;border-radius:50%;color:rgba(226,232,240,0.8);cursor:pointer;font-size:0.9rem;padding:0;';
+    closeBtn.addEventListener('click', () => banner.remove());
+
+    header.appendChild(label);
+    header.appendChild(closeBtn);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.cssText = 'display:block;color:#60a5fa;font-weight:600;text-decoration:none;word-break:break-all;line-height:1.4;';
+    link.textContent = `⬇️ Tap to download ${filename}`;
+
+    banner.appendChild(header);
+    banner.appendChild(link);
+    document.body.appendChild(banner);
+
+    // Don't let it linger forever if it's never dismissed manually.
+    setTimeout(() => banner.remove(), 5 * 60 * 1000);
   }
 
   showDownloadProgress(message, filename = '') {

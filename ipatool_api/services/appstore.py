@@ -45,6 +45,8 @@ from .models import (
     Account,
     App,
     BagOutput,
+    CommunityVersionEntry,
+    CommunityVersionsOutput,
     DownloadOutput,
     GetVersionMetadataOutput,
     ListVersionsOutput,
@@ -381,7 +383,7 @@ class AppStoreService:
             raise TemporarilyUnavailableError("item temporarily unavailable", metadata=result.data)
         if customer_message == constants.CUSTOMER_MESSAGE_SUBSCRIPTION_REQUIRED:
             raise SubscriptionRequiredError("subscription required", metadata=result.data)
-        if failure_type == constants.FAILURE_PASSWORD_TOKEN_EXPIRED:
+        if failure_type == constants.FAILURE_PASSWORD_TOKEN_EXPIRED or customer_message == constants.CUSTOMER_MESSAGE_PASSWORD_CHANGED:
             raise PasswordTokenExpiredError("password token expired", metadata=result.data)
         if failure_type:
             message = customer_message or "purchase failed"
@@ -492,6 +494,75 @@ class AppStoreService:
             external_version_identifiers=external_ids,
             latest_external_version_id=latest,
         )
+
+    # ------------------------------------------------------------------
+    # Community (third-party) version database - Timbrd
+    # ------------------------------------------------------------------
+    #
+    # api.timbrd.com maintains its own independent, crowd-sourced database
+    # mapping app ids to the external version ids of every build it has ever
+    # seen - the same source used by third-party sideloading tools and the
+    # AppData jailbreak tweak's "Downgrade" feature (confirmed via a
+    # captured request: plain GET,
+    # `https://api.timbrd.com/apple/app-version/index.php?id=<trackId>`, no
+    # auth at all).
+    #
+    # This is a deliberately separate, opt-in path (see the "source"
+    # toggle in the UI/route layer) - not a replacement for list_versions()
+    # above. Caveats:
+    #  - unofficial, not run or endorsed by Apple - could go away, be wrong,
+    #    or be incomplete for a given app
+    #  - an external_identifier being listed here doesn't guarantee Apple
+    #    will actually hand it to *this* account today - the real download
+    #    still goes through the normal, official download() flow, which can
+    #    still fail (e.g. for a genuinely delisted old version)
+    #  - only gives build-version/date/size, not full metadata - use
+    #    get_version_metadata() for that once you have picked an
+    #    external_version_id from this list
+    TIMBRD_API_URL = "https://api.timbrd.com/apple/app-version/index.php"
+
+    def list_versions_community(self, app: App) -> CommunityVersionsOutput:
+        if not app.id:
+            raise AppStoreError("app id is required for community version lookup")
+
+        response = self._http.raw_request(
+            "GET",
+            self.TIMBRD_API_URL,
+            params={"id": app.id},
+            timeout=(constants.DEFAULT_CONNECT_TIMEOUT, constants.DEFAULT_READ_TIMEOUT),
+        )
+        try:
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            raise AppStoreError(f"community version lookup failed: {exc}") from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise AppStoreError("community version lookup returned invalid data") from exc
+
+        if not isinstance(data, list):
+            raise AppStoreError("community version lookup returned unexpected data shape")
+
+        entries: List[CommunityVersionEntry] = []
+        for raw in data:
+            if not isinstance(raw, dict):
+                continue
+            external_id = raw.get("external_identifier")
+            if external_id is None:
+                continue
+            entries.append(
+                CommunityVersionEntry(
+                    external_version_id=str(external_id),
+                    bundle_version=str(raw.get("bundle_version", "")).strip(),
+                    created_at=raw.get("created_at"),
+                    size=raw.get("size"),
+                )
+            )
+
+        entries.sort(key=lambda e: e.created_at or "", reverse=True)
+
+        return CommunityVersionsOutput(source="timbrd", entries=entries)
 
     # ------------------------------------------------------------------
     # Platform (iPhone / iPad / Apple TV) support
@@ -787,7 +858,13 @@ class AppStoreService:
             response = self._http.send(request)
             print(f"Response status: {response.status_code}")
             print(f"Response headers: {response.headers}")
-            print(f"Response data type: {type(response.data)}")
+            # Previously this printed type(response.data) - just "<class
+            # 'dict'>" - which hid exactly the fields (failureType,
+            # customerMessage) needed to diagnose *why* a request failed.
+            data_repr = repr(response.data)
+            if len(data_repr) > 4000:
+                data_repr = data_repr[:4000] + "... (truncated)"
+            print(f"Response data: {data_repr}")
             return response
         except HTTPClientResponseError as exc:
             print(f"HTTP error: {exc.status_code} {exc.body}")
@@ -850,11 +927,30 @@ class AppStoreService:
     def _validate_download_result(self, result: HTTPResult) -> None:
         failure_type = result.data.get("failureType", "")
         customer_message = result.data.get("customerMessage", "")
+        market_allowed = result.data.get("m-allowed", True)
 
-        if failure_type == constants.FAILURE_PASSWORD_TOKEN_EXPIRED:
+        if failure_type == constants.FAILURE_PASSWORD_TOKEN_EXPIRED or customer_message == constants.CUSTOMER_MESSAGE_PASSWORD_CHANGED:
             raise PasswordTokenExpiredError("password token expired", metadata=result.data)
         if failure_type == constants.FAILURE_LICENSE_NOT_FOUND:
             raise LicenseRequiredError("license required", metadata=result.data)
+        # Apple's generic catch-all (failureType 5002, "An unknown error has
+        # occurred") with m-allowed=False applies identically whether we're
+        # asking for the version list or trying to download one specific
+        # version - it's evaluated per account+app, not per request. A
+        # version existing in a third-party database (e.g. Timbrd) doesn't
+        # change this: Apple's own server still refuses it on this account,
+        # for reasons unrelated to licensing (observed to persist even after
+        # a successful purchase in prior investigation). This is not
+        # something retryable or fixable client-side - surface it plainly
+        # instead of a bare "unknown error".
+        if failure_type == constants.FAILURE_UNKNOWN_ERROR and market_allowed is False:
+            raise AppStoreError(
+                (customer_message or "An unknown error has occurred")
+                + " - Apple is refusing this app/version for this account (not a licensing issue - "
+                "this can happen even for versions listed in a community database, since Apple "
+                "re-checks eligibility on every download, not just when listing versions)",
+                metadata=result.data,
+            )
         if failure_type and customer_message:
             raise AppStoreError(customer_message, metadata=result.data)
         if failure_type:
